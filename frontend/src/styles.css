@@ -1,0 +1,68 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-2: #273449;
+  --line: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --memo: #a78bfa;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+h1, h2, h3 { font-weight: 600; margin: 0; }
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.primary { background: #0369a1; border-color: #0284c7; color: #fff; }
+button.confirm { background: #047857; border-color: #059669; color: #fff; }
+button.pay { background: #b45309; border-color: #d97706; color: #fff; }
+input, select {
+  font-family: inherit;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; }
+.num { font-variant-numeric: tabular-nums; text-align: right; }
+.muted { color: var(--muted); }
+.tag {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; border: 1px solid var(--line);
+}
+.tag.SIMULATED { color: var(--accent); border-color: var(--accent); }
+.tag.CONFIRMED { color: var(--good); border-color: var(--good); }
+.tag.PAID_SIMULATED { color: var(--warn); border-color: var(--warn); }
+.tag.PLEDGED, .tag.DISPUTED { color: var(--bad); border-color: var(--bad); }
+.tag.SETTLED { color: var(--good); border-color: var(--good); }
+.tag.OPEN { color: var(--muted); }
+.bank-banner {
+  background: #422006; border: 1px solid #b45309; color: #fde68a;
+  padding: 6px 12px; border-radius: 6px; font-size: 12.5px; margin-bottom: 12px;
+}
