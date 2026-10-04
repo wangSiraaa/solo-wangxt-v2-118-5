@@ -124,14 +124,16 @@ public class ClearingController {
 
     public record SimulateRequest(LocalDate valuationDate,
                                   List<String> agreementCodes,
-                                  String note) {
+                                  String note,
+                                  Boolean onlyDueClaims) {
     }
 
     @PostMapping("/batches/simulate")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> simulate(@Valid @RequestBody SimulateRequest request) {
         NettingBatch batch = batchService.simulate(new SimulationRequest(
-                request.valuationDate(), request.agreementCodes(), request.note()));
+                request.valuationDate(), request.agreementCodes(), request.note(),
+                Boolean.TRUE.equals(request.onlyDueClaims())));
         return toBatchJson(batchService.getBatch(batch.getId()));
     }
 
@@ -141,6 +143,7 @@ public class ClearingController {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", b.getId());
             m.put("valuationDate", b.getValuationDate());
+            m.put("onlyDueClaims", b.isOnlyDueClaims());
             m.put("status", b.getStatus().name());
             m.put("incomingClaimCount", b.getIncomingClaimCount());
             m.put("includedClaimCount", b.getIncludedClaimCount());
@@ -177,6 +180,7 @@ public class ClearingController {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", b.getId());
         m.put("valuationDate", b.getValuationDate());
+        m.put("onlyDueClaims", b.isOnlyDueClaims());
         m.put("status", b.getStatus().name());
         m.put("incomingClaimCount", b.getIncomingClaimCount());
         m.put("includedClaimCount", b.getIncludedClaimCount());

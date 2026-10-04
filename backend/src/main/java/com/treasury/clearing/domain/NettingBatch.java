@@ -24,6 +24,14 @@ public class NettingBatch {
     @Column(name = "valuation_date", nullable = false)
     private LocalDate valuationDate;
 
+    /**
+     * Batch-level maturity screen: when true, only claims due on/before the
+     * valuation date participate in netting; later-due claims are excluded
+     * (NOT_DUE). Pass-through agreements are unaffected.
+     */
+    @Column(name = "only_due_claims", nullable = false)
+    private boolean onlyDueClaims = false;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private BatchStatus status = BatchStatus.SIMULATED;
@@ -71,8 +79,14 @@ public class NettingBatch {
     }
 
     public NettingBatch(String id, LocalDate valuationDate, OffsetDateTime createdAt, String note) {
+        this(id, valuationDate, false, createdAt, note);
+    }
+
+    public NettingBatch(String id, LocalDate valuationDate, boolean onlyDueClaims,
+                        OffsetDateTime createdAt, String note) {
         this.id = id;
         this.valuationDate = valuationDate;
+        this.onlyDueClaims = onlyDueClaims;
         this.createdAt = createdAt;
         this.note = note;
     }
@@ -88,6 +102,10 @@ public class NettingBatch {
 
     public LocalDate getValuationDate() {
         return valuationDate;
+    }
+
+    public boolean isOnlyDueClaims() {
+        return onlyDueClaims;
     }
 
     public BatchStatus getStatus() {

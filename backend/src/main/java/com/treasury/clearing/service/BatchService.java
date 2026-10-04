@@ -38,7 +38,14 @@ public class BatchService {
 
     public record SimulationRequest(LocalDate valuationDate,
                                     List<String> agreementCodes, // null/empty = all active
-                                    String note) {
+                                    String note,
+                                    /** Optional maturity screen: only claims due on/before
+                                     *  the valuation date enter netting. Default false. */
+                                    boolean onlyDueClaims) {
+        /** Backwards-compatible request without the maturity screen. */
+        public SimulationRequest(LocalDate valuationDate, List<String> agreementCodes, String note) {
+            this(valuationDate, agreementCodes, note, false);
+        }
     }
 
     @Transactional
@@ -55,7 +62,8 @@ public class BatchService {
         String batchId = "B" + valuationDate.toString().replace("-", "")
                 + "-" + Integer.toHexString(now.toLocalTime().toSecondOfDay())
                 + "-" + UUID.randomUUID().toString().substring(0, 6);
-        NettingBatch batch = new NettingBatch(batchId, valuationDate, now, request.note());
+        NettingBatch batch = new NettingBatch(batchId, valuationDate,
+                request.onlyDueClaims(), now, request.note());
 
         int incoming = 0;
         int included = 0;
@@ -84,7 +92,8 @@ public class BatchService {
                     GroupMode mode = a.isAllowsNetting()
                             ? GroupMode.NET_SAME_CURRENCY
                             : GroupMode.PASS_THROUGH;
-                    PlannedGroup pg = runPocket(a, ccy, mode, agreementClaims, valuationDate, now);
+                    PlannedGroup pg = runPocket(a, ccy, mode, agreementClaims, valuationDate,
+                            request.onlyDueClaims(), now);
                     if (pg == null) {
                         continue;
                     }
@@ -103,7 +112,7 @@ public class BatchService {
                             "cross-currency agreement " + a.getCode() + " has no settlement currency");
                 }
                 PlannedGroup pg = runPocket(a, settlement, GroupMode.NET_CROSS_CURRENCY,
-                        agreementClaims, valuationDate, now);
+                        agreementClaims, valuationDate, request.onlyDueClaims(), now);
                 if (pg == null) {
                     continue;
                 }
@@ -136,21 +145,21 @@ public class BatchService {
 
     private PlannedGroup runPocket(NettingAgreement a, String groupCurrency, GroupMode mode,
                                    List<Claim> agreementClaims, LocalDate valuationDate,
-                                   OffsetDateTime now) {
+                                   boolean onlyDueClaims, OffsetDateTime now) {
         AgreementSpec spec = new AgreementSpec(a.getCode(), a.getName(), a.isAllowsNetting(),
                 a.isCrossCurrency(), new HashSet<>(a.getMembers()), new HashSet<>(a.getCurrencies()),
                 groupCurrency, a.getRoundingBearerCode());
         List<PlannerClaim> plannerClaims = agreementClaims.stream()
                 .map(c -> new PlannerClaim(c.getId(), c.getInvoiceNo(), c.getAgreementCode(),
                         c.getDebtorCode(), c.getCreditorCode(), c.getAmount(), c.getCurrency(),
-                        c.getStatus(), c.getDescription()))
+                        c.getStatus(), c.getDueDate(), c.getDescription()))
                 .toList();
 
         OffsetDateTime fxAsOf = a.getFxAsOf() != null
                 ? a.getFxAsOf()
                 : valuationDate.atTime(23, 59, 59).atOffset(ZoneOffset.UTC);
         PlannedGroup pg = NettingPlanner.plan(spec, plannerClaims, groupCurrency, mode,
-                fxProvider, fxAsOf, a.getFxMargin());
+                fxProvider, fxAsOf, a.getFxMargin(), onlyDueClaims, valuationDate);
         if (pg.legs().isEmpty() && pg.exclusions().isEmpty()) {
             return null;
         }

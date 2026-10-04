@@ -5,6 +5,7 @@ import com.treasury.clearing.domain.LedgerSide;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.*;
 
@@ -15,11 +16,39 @@ class NettingPlannerTest {
     private static PlannerClaim claim(String id, String debtor, String creditor,
                                       String amount, String ccy, ClaimStatus status) {
         return new PlannerClaim(id, "INV-" + id, "AGR", debtor, creditor,
-                new BigDecimal(amount), ccy, status, "test");
+                new BigDecimal(amount), ccy, status, null, "test");
     }
 
     private static PlannerClaim claim(String id, String debtor, String creditor, String amount) {
         return claim(id, debtor, creditor, amount, "CNY", ClaimStatus.OPEN);
+    }
+
+    /** Open CNY claim with an explicit maturity (due) date. */
+    private static PlannerClaim dueClaim(String id, String debtor, String creditor,
+                                         String amount, LocalDate dueDate) {
+        return new PlannerClaim(id, "INV-" + id, "AGR", debtor, creditor,
+                new BigDecimal(amount), "CNY", ClaimStatus.OPEN, dueDate, "test");
+    }
+
+    /** Open CNY claim with a status and an explicit maturity date. */
+    private static PlannerClaim dueClaim(String id, String debtor, String creditor, String amount,
+                                         ClaimStatus status, LocalDate dueDate) {
+        return new PlannerClaim(id, "INV-" + id, "AGR", debtor, creditor,
+                new BigDecimal(amount), "CNY", status, dueDate, "test");
+    }
+
+    private static PlannedGroup planSameCcy(AgreementSpec spec, List<PlannerClaim> claims,
+                                            boolean onlyDueClaims, LocalDate valuationDate) {
+        return NettingPlanner.plan(spec, claims, "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), OffsetDateTime.parse("2026-09-30T09:00:00Z"), null,
+                onlyDueClaims, valuationDate);
+    }
+
+    private static PlannedGroup planPassThrough(AgreementSpec spec, List<PlannerClaim> claims,
+                                                boolean onlyDueClaims, LocalDate valuationDate) {
+        return NettingPlanner.plan(spec, claims, "CNY", GroupMode.PASS_THROUGH,
+                fixedFx(Map.of()), OffsetDateTime.parse("2026-09-30T09:00:00Z"), null,
+                onlyDueClaims, valuationDate);
     }
 
     private static AgreementSpec spec(boolean allowsNetting, boolean crossCcy, String... members) {
@@ -312,5 +341,107 @@ class NettingPlannerTest {
         assertThat(g.originalLegCount()).isZero();
         assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
                 .containsExactly("FX_RATE_MISSING");
+    }
+
+    // ------------------------------------------------------------------
+    // Optional batch-level maturity screen ("only matured claims")
+    // ------------------------------------------------------------------
+
+    private static final LocalDate VAL = LocalDate.parse("2026-09-30");
+
+    @Test
+    void maturityScreenOffKeepsExistingBehaviour() {
+        // Both invoices are included even though one matures after the valuation date.
+        PlannedGroup g = planSameCcy(spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("c1", "A", "B", "300.00", VAL),
+                        dueClaim("c2", "B", "A", "200.00", LocalDate.parse("2026-10-20"))),
+                false, VAL);
+        assertThat(g.exclusions()).isEmpty();
+        assertThat(g.originalLegCount()).isEqualTo(2);
+        assertThat(cashAmount(g, "A", "B")).isEqualByComparingTo("100.00");
+    }
+
+    @Test
+    void maturityScreenIncludesOnlyTheMaturedClaim() {
+        // Same group, one matured and one not-yet-due invoice -> only the former nets.
+        PlannedGroup g = planSameCcy(spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("c1", "A", "B", "300.00", VAL),
+                        dueClaim("c2", "B", "A", "200.00", LocalDate.parse("2026-10-20"))),
+                true, VAL);
+
+        assertThat(g.originalLegCount()).isEqualTo(1);
+        PlannedExclusion ex = g.exclusions().stream().findFirst().orElseThrow();
+        assertThat(ex.reasonCode()).isEqualTo("NOT_DUE");
+        assertThat(ex.claimId()).isEqualTo("c2");
+        // The detail states the due date and why it was deferred.
+        assertThat(ex.reasonDetail()).contains("2026-10-20").contains("deferred");
+        // A->B 300 can no longer meet B->A 200: it survives as a full real payment.
+        assertThat(cashLegCount(g)).isEqualTo(1);
+        assertThat(cashAmount(g, "A", "B")).isEqualByComparingTo("300.00");
+    }
+
+    @Test
+    void claimDueExactlyOnValuationDateIsIncluded() {
+        PlannedGroup g = planSameCcy(spec(true, false, "A", "B"),
+                List.of(dueClaim("c1", "A", "B", "100.00", VAL)),
+                true, VAL);
+        assertThat(g.exclusions()).isEmpty();
+        assertThat(cashAmount(g, "A", "B")).isEqualByComparingTo("100.00");
+    }
+
+    @Test
+    void claimWithoutDueDateKeepsExistingTreatment() {
+        // Null due date is not a reason to defer: the claim stays included.
+        PlannedGroup g = planSameCcy(spec(true, false, "A", "B"),
+                List.of(
+                        claim("c1", "A", "B", "300.00"),
+                        dueClaim("c2", "B", "A", "200.00", LocalDate.parse("2026-10-20"))),
+                true, VAL);
+        assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
+                .containsExactly("NOT_DUE");
+        assertThat(cashAmount(g, "A", "B")).isEqualByComparingTo("300.00");
+    }
+
+    @Test
+    void afterValuationDateAdvancesTheDeferredClaimCanNet() {
+        // Re-trial after the invoice matures: same claims now both net, and the
+        // engine output is the same as a run without the screen.
+        PlannedGroup later = planSameCcy(spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("c1", "A", "B", "300.00", VAL),
+                        dueClaim("c2", "B", "A", "200.00", LocalDate.parse("2026-10-20"))),
+                true, LocalDate.parse("2026-10-31"));
+        assertThat(later.exclusions()).isEmpty();
+        assertThat(cashAmount(later, "A", "B")).isEqualByComparingTo("100.00");
+    }
+
+    @Test
+    void pledgedAndDisputedKeepTheirOriginalReasonsUnderMaturityScreen() {
+        // Status rules win over the maturity screen: a pledged/disputed claim is
+        // reported with its own reason even if it is also not yet due.
+        PlannedGroup g = planSameCcy(spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("c1", "A", "B", "100.00", VAL),
+                        dueClaim("c2", "B", "A", "100.00", ClaimStatus.PLEDGED,
+                                LocalDate.parse("2026-10-20")),
+                        dueClaim("c3", "B", "A", "100.00", ClaimStatus.DISPUTED,
+                                LocalDate.parse("2026-10-20"))),
+                true, VAL);
+        assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
+                .containsExactlyInAnyOrder("PLEDGED", "DISPUTED");
+    }
+
+    @Test
+    void maturityScreenDoesNotTouchPassThroughAgreement() {
+        // Set-off forbidden -> original debts are preserved 1:1, no NOT_DUE rows.
+        PlannedGroup g = planPassThrough(spec(false, false, "A", "B"),
+                List.of(dueClaim("c1", "A", "B", "500.00", LocalDate.parse("2026-10-20"))),
+                true, VAL);
+        assertThat(g.passThrough()).isTrue();
+        assertThat(g.legs()).hasSize(1);
+        assertThat(g.exclusions()).isEmpty();
+        assertThat(g.legs().get(0).amount()).isEqualByComparingTo("500.00");
     }
 }

@@ -105,6 +105,8 @@ export interface BatchGroup {
 export interface Batch {
   id: string;
   valuationDate: string;
+  /** True when this batch only netted claims matured on/before the valuation date. */
+  onlyDueClaims: boolean;
   status: 'SIMULATED' | 'CONFIRMED' | 'PAID_SIMULATED';
   incomingClaimCount: number;
   includedClaimCount: number;

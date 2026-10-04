@@ -23,7 +23,8 @@ public class BatchExclusion {
 
     /**
      * PLEDGED, DISPUTED, NOT_OPEN, NOT_MEMBER_PAIR, CCY_NOT_ALLOWED,
-     * CROSS_CCY_NOT_ALLOWED, FX_RATE_MISSING, AGREEMENT_INACTIVE, SELF_DEBT
+     * CROSS_CCY_NOT_ALLOWED, FX_RATE_MISSING, AGREEMENT_INACTIVE, SELF_DEBT,
+     * NOT_DUE (optional maturity screen: due date is later than the valuation date)
      */
     @Column(name = "reason_code", nullable = false, length = 32)
     private String reasonCode;

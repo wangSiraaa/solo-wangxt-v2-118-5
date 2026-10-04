@@ -12,6 +12,7 @@ import { Batch } from '../models';
         <div class="muted">批次</div>
         <div class="big">{{ batch.id }}</div>
         <div class="muted">{{ batch.valuationDate }}</div>
+        <div *ngIf="batch.onlyDueClaims"><span class="tag DUE">仅已到期</span></div>
       </div>
       <div class="card">
         <div class="muted">状态</div>
@@ -43,6 +44,7 @@ import { Batch } from '../models';
     .tag.SIMULATED { color:#7dd3fc; border-color:#38bdf8; }
     .tag.CONFIRMED { color:#6ee7b7; border-color:#34d399; }
     .tag.PAID_SIMULATED { color:#fcd34d; border-color:#fbbf24; }
+    .tag.DUE { color:#fcd34d; border-color:#fbbf24; }
   `],
 })
 export class BatchSummaryComponent {

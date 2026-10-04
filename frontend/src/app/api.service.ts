@@ -27,9 +27,10 @@ export class ClearingApiService {
   getBatch(id: string): Observable<Batch> {
     return this.http.get<Batch>(`${this.base}/batches/${id}`);
   }
-  simulate(valuationDate: string, agreementCodes: string[], note: string): Observable<Batch> {
+  simulate(valuationDate: string, agreementCodes: string[], note: string,
+           onlyDueClaims = false): Observable<Batch> {
     return this.http.post<Batch>(`${this.base}/batches/simulate`, {
-      valuationDate, agreementCodes, note,
+      valuationDate, agreementCodes, note, onlyDueClaims,
     });
   }
   confirm(id: string): Observable<Batch> {

@@ -40,6 +40,10 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               </option>
             </select>
           </label>
+          <label class="check">
+            <input type="checkbox" [(ngModel)]="onlyDueClaims">
+            只纳入估值日已到期债权
+          </label>
           <input class="note" placeholder="备注（可选）" [(ngModel)]="note">
           <button class="primary" (click)="runSimulation()" [disabled]="loading">
             {{ loading ? '试算中…' : '生成试算方案（不改动债权）' }}
@@ -50,6 +54,11 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
           币种 {{ a.currencies.join('、') || '不限' }}；
           跨币种 {{ a.crossCurrency ? '允许（结算 ' + a.settlementCurrency + '）' : '不允许' }}；
           尾差承担人 {{ a.roundingBearerCode || '—' }}。
+        </div>
+        <div class="muted hint">
+          到期筛选：勾选后仅允许互抵协议中到期日 ≤ 估值日的债权参与抵销，
+          到期日在估值日之后的债权进入排除清单（NOT_DUE）；到期日为空的债权按原规则处理，
+          禁止互抵协议不受影响。不勾选时试算行为不变。
         </div>
       </section>
 
@@ -66,7 +75,10 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
           </thead>
           <tbody>
           <tr *ngFor="let b of batches" [class.active]="current?.id === b.id">
-            <td>{{ b.id }}</td>
+            <td>
+              {{ b.id }}
+              <span class="tag DUE" *ngIf="b.onlyDueClaims" title="本批次只纳入估值日已到期债权">仅已到期</span>
+            </td>
             <td>{{ b.valuationDate }}</td>
             <td><span class="tag" [class]="b.status">{{ statusText(b.status) }}</span></td>
             <td class="num">{{ b.includedClaimCount }} / {{ b.excludedClaimCount }}</td>
@@ -80,6 +92,10 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
 
       <!-- ---------------- 当前批次 ---------------- -->
       <ng-container *ngIf="current">
+        <div class="due-banner" *ngIf="current.onlyDueClaims">
+          ⏳ 本批次启用了到期筛选（随批次保存）：仅到期日 ≤ 估值日 {{ current.valuationDate }}
+          的债权参与互抵；到期日在估值日之后的债权见各分组排除清单（NOT_DUE）。
+        </div>
         <app-batch-summary [batch]="current"></app-batch-summary>
 
         <div class="lifecycle">
@@ -163,7 +179,11 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               <tr *ngFor="let ex of g.exclusions">
                 <td>{{ ex.invoiceNo }}</td>
                 <td>{{ ex.claimId }}</td>
-                <td><span class="tag DISPUTED">{{ ex.reasonCode }}</span></td>
+                <td>
+                  <span class="tag" [class]="exclusionClass(ex.reasonCode)">
+                    {{ exclusionText(ex.reasonCode) }}
+                  </span>
+                </td>
                 <td class="muted">{{ ex.reasonDetail }}</td>
               </tr>
               </tbody>
@@ -202,6 +222,10 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
     .tag.CASH { color: #7dd3fc; border-color: #38bdf8; }
     .tag.MEMO { color: #c4b5fd; border-color: #a78bfa; }
     .tag.LEGORIG { color: #cbd5e1; border-color: #94a3b8; }
+    .tag.DISPUTED { color: #fca5a5; border-color: #f87171; }
+    .tag.DUE { color: #fcd34d; border-color: #fbbf24; margin-left: 6px; }
+    .controls label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text, #e2e8f0); white-space: nowrap; }
+    .due-banner { background: rgba(251,191,36,.10); border: 1px solid rgba(251,191,36,.45); color: #fcd34d; border-radius: 8px; padding: 9px 14px; margin: 14px 0 0; font-size: 13px; }
     .bad { color: var(--bad); }
     .foot { margin-top: 20px; }
   `],
@@ -215,6 +239,7 @@ export class AppComponent implements OnInit {
   valuationDate = '2026-09-30';
   selectedAgreement = '';
   note = '';
+  onlyDueClaims = false;
   loading = false;
   busy = false;
 
@@ -253,7 +278,7 @@ export class AppComponent implements OnInit {
   runSimulation(): void {
     this.loading = true;
     const codes = this.selectedAgreement ? [this.selectedAgreement] : [];
-    this.api.simulate(this.valuationDate, codes, this.note).subscribe({
+    this.api.simulate(this.valuationDate, codes, this.note, this.onlyDueClaims).subscribe({
       next: (b) => {
         this.loading = false;
         this.batches = [b, ...this.batches];
@@ -327,6 +352,27 @@ export class AppComponent implements OnInit {
 
   legText(l: { isOriginal: boolean; amount: number }): string {
     return l.isOriginal ? '原债保留' : l.amount === 0 ? '抵销' : '实付';
+  }
+
+  /** Chinese label shown next to the raw exclusion reason code. */
+  exclusionText(reason: string): string {
+    const labels: Record<string, string> = {
+      NOT_DUE: 'NOT_DUE · 未到期',
+      PLEDGED: 'PLEDGED · 已质押',
+      DISPUTED: 'DISPUTED · 有争议',
+      NOT_OPEN: 'NOT_OPEN · 非开放',
+      NOT_MEMBER_PAIR: 'NOT_MEMBER_PAIR · 非协议成员',
+      CCY_NOT_ALLOWED: 'CCY_NOT_ALLOWED · 币种超范围',
+      CROSS_CCY_NOT_ALLOWED: 'CROSS_CCY_NOT_ALLOWED · 禁止跨币种',
+      FX_RATE_MISSING: 'FX_RATE_MISSING · 缺汇率',
+      SELF_DEBT: 'SELF_DEBT · 同一法人',
+    };
+    return labels[reason] ?? reason;
+  }
+
+  exclusionClass(reason: string): string {
+    return reason === 'NOT_DUE' ? 'DUE' : reason === 'PLEDGED' || reason === 'DISPUTED'
+      ? 'DISPUTED' : 'LEGORIG';
   }
 
   money(v: number): string {

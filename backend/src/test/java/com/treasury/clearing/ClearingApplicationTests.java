@@ -128,8 +128,90 @@ class ClearingApplicationTests {
                 .andExpect(status().isConflict());
     }
 
+    /**
+     * Optional maturity screen on the NA-DUE demo group:
+     * matured (due on/before valuation date) and no-due-date invoices enter netting,
+     * the after-valuation-date invoice is deferred with NOT_DUE; once the valuation
+     * date moves past its due date a new batch includes it while the old batch is
+     * untouched; pass-through (NA-NOFF) agreements keep every original debt.
+     */
+    @Test
+    void maturityScreenIsOptionalSavedAndReversibleByAdvancingValuationDate() throws Exception {
+        // ---- screen OFF: existing trial behaviour, all three invoices net ----
+        JsonNode plain = simulate(LocalDate.of(2026, 9, 30), false);
+        assertThat(plain.get("onlyDueClaims").asBoolean()).isFalse();
+        JsonNode duePlain = group(plain, "NA-DUE");
+        assertThat(duePlain.get("exclusions").size()).isZero();
+        // A->B 300 (due 09-30) nets B->A 200 (due 10-20), A->B 100 (no due date):
+        // one real leg A -> B for 200, and the no-due invoice stays in.
+        assertThat(duePlain.get("originalLegCount").asInt()).isEqualTo(3);
+        assertThat(cashAmount(duePlain, "A", "B")).isEqualByComparingTo("200.00");
+
+        // ---- screen ON at 2026-09-30: only the matured + no-due invoices net ----
+        JsonNode screened = simulate(LocalDate.of(2026, 9, 30), true);
+        assertThat(screened.get("onlyDueClaims").asBoolean()).isTrue();
+        JsonNode due = group(screened, "NA-DUE");
+        assertThat(due.get("originalLegCount").asInt()).isEqualTo(2);
+        assertThat(due.get("exclusions").size()).isEqualTo(1);
+        JsonNode deferred = due.get("exclusions").get(0);
+        assertThat(deferred.get("reasonCode").asText()).isEqualTo("NOT_DUE");
+        assertThat(deferred.get("claimId").asText()).isEqualTo("CLM-DUE-002");
+        assertThat(deferred.get("reasonDetail").asText())
+                .contains("2026-10-20")
+                .containsIgnoringCase("after the valuation date");
+        // B->A 200 is gone: the two A->B invoices (300 + 100) survive as real payments.
+        assertThat(cashAmount(due, "A", "B")).isEqualByComparingTo("400.00");
+        java.util.Set<String> includedInvoices = new java.util.HashSet<>();
+        for (JsonNode leg : due.get("legs")) {
+            for (JsonNode it : leg.get("items")) {
+                includedInvoices.add(it.get("invoiceNo").asText());
+            }
+        }
+        assertThat(includedInvoices).containsExactlyInAnyOrder("INV-DA-1001", "INV-DA-1002");
+
+        // The choice is persisted: reloading the batch shows onlyDueClaims=true.
+        JsonNode reloaded = json.readTree(mockMvc.perform(get("/api/batches/"
+                        + screened.get("id").asText())).andReturn().getResponse().getContentAsString());
+        assertThat(reloaded.get("onlyDueClaims").asBoolean()).isTrue();
+
+        // Pledged/disputed claims keep their original rules under the screen even when
+        // they are also not yet due (the NA-CNY ring invoices, due in October, are
+        // reported separately as NOT_DUE — the maturity screen is working there too).
+        JsonNode cny = group(screened, "NA-CNY");
+        assertThat(reasonOf(cny, "CLM-EX-001")).isEqualTo("PLEDGED");
+        assertThat(reasonOf(cny, "CLM-EX-002")).isEqualTo("DISPUTED");
+
+        // Pass-through agreements ignore the screen: three original debts retained.
+        JsonNode noff = group(screened, "NA-NOFF");
+        assertThat(noff.get("passThrough").asBoolean()).isTrue();
+        assertThat(noff.get("legs").size()).isEqualTo(3);
+        assertThat(reasons(noff)).doesNotContain("NOT_DUE");
+
+        // ---- valuation date advanced past 2026-10-20: deferred invoice now nets ----
+        JsonNode advanced = simulate(LocalDate.of(2026, 10, 31), true);
+        JsonNode dueAdvanced = group(advanced, "NA-DUE");
+        assertThat(dueAdvanced.get("exclusions").size()).isZero();
+        assertThat(dueAdvanced.get("originalLegCount").asInt()).isEqualTo(3);
+        assertThat(cashAmount(dueAdvanced, "A", "B")).isEqualByComparingTo("200.00");
+
+        // ---- old batches are immutable snapshots ----
+        JsonNode oldAgain = json.readTree(mockMvc.perform(get("/api/batches/"
+                        + screened.get("id").asText())).andReturn().getResponse().getContentAsString());
+        assertThat(oldAgain.get("valuationDate").asText()).isEqualTo("2026-09-30");
+        JsonNode oldDue = group(oldAgain, "NA-DUE");
+        assertThat(oldDue.get("exclusions").size()).isEqualTo(1);
+        assertThat(oldDue.get("exclusions").get(0).get("claimId").asText())
+                .isEqualTo("CLM-DUE-002");
+    }
+
     private JsonNode simulate(LocalDate date) throws Exception {
-        var req = json.createObjectNode().put("valuationDate", date.toString());
+        return simulate(date, false);
+    }
+
+    private JsonNode simulate(LocalDate date, boolean onlyDueClaims) throws Exception {
+        var req = json.createObjectNode()
+                .put("valuationDate", date.toString())
+                .put("onlyDueClaims", onlyDueClaims);
         return json.readTree(mockMvc.perform(post("/api/batches/simulate")
                         .contentType("application/json")
                         .content(json.writeValueAsString(req)))
@@ -167,10 +249,31 @@ class ClearingApplicationTests {
         return n;
     }
 
+    private java.math.BigDecimal cashAmount(JsonNode g, String payer, String receiver) {
+        java.math.BigDecimal total = java.math.BigDecimal.ZERO;
+        for (JsonNode leg : g.get("legs")) {
+            if (leg.get("amount").asDouble() > 0
+                    && leg.get("payerCode").asText().equals(payer)
+                    && leg.get("receiverCode").asText().equals(receiver)) {
+                total = total.add(leg.get("amount").decimalValue());
+            }
+        }
+        return total;
+    }
+
     private java.util.List<String> reasons(JsonNode g) {
         java.util.List<String> out = new java.util.ArrayList<>();
         g.get("exclusions").forEach(e -> out.add(e.get("reasonCode").asText()));
         return out;
+    }
+
+    private String reasonOf(JsonNode g, String claimId) {
+        for (JsonNode e : g.get("exclusions")) {
+            if (e.get("claimId").asText().equals(claimId)) {
+                return e.get("reasonCode").asText();
+            }
+        }
+        throw new AssertionError("exclusion missing for claim: " + claimId);
     }
 
     private JsonNode findItem(JsonNode g, String claimId, String side) {
