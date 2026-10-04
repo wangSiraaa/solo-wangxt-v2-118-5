@@ -61,6 +61,15 @@ public class NettingBatch {
     @Column(name = "paid_simulated_at")
     private OffsetDateTime paidSimulatedAt;
 
+    /**
+     * Optional per-batch maturity gate. When true only claims already due on the
+     * valuation date could enter set-off; later-due claims were deferred to the
+     * exclusion list. Null/false batches keep the original unfiltered behaviour.
+     * Stored per batch so the choice stays auditable and old batches never change.
+     */
+    @Column(name = "due_filter_enabled", nullable = false)
+    private boolean dueFilterEnabled = false;
+
     @Column(length = 256)
     private String note;
 
@@ -71,10 +80,16 @@ public class NettingBatch {
     }
 
     public NettingBatch(String id, LocalDate valuationDate, OffsetDateTime createdAt, String note) {
+        this(id, valuationDate, createdAt, note, false);
+    }
+
+    public NettingBatch(String id, LocalDate valuationDate, OffsetDateTime createdAt, String note,
+                        boolean dueFilterEnabled) {
         this.id = id;
         this.valuationDate = valuationDate;
         this.createdAt = createdAt;
         this.note = note;
+        this.dueFilterEnabled = dueFilterEnabled;
     }
 
     public void addGroup(BatchGroup group) {
@@ -136,6 +151,10 @@ public class NettingBatch {
 
     public String getNote() {
         return note;
+    }
+
+    public boolean isDueFilterEnabled() {
+        return dueFilterEnabled;
     }
 
     public List<BatchGroup> getGroups() {

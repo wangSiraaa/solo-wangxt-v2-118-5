@@ -5,6 +5,7 @@ import com.treasury.clearing.domain.LedgerSide;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -87,6 +88,32 @@ public final class NettingPlanner {
                                     FxRateProvider fxProvider,
                                     OffsetDateTime fxAsOf,
                                     BigDecimal fxMargin) {
+        // Default trial: no maturity gate, identical to the historical behaviour.
+        return plan(spec, claims, groupCurrency, mode, fxProvider, fxAsOf, fxMargin,
+                null, false);
+    }
+
+    /**
+     * Plans one pocket.
+     *
+     * @param valuationDate    batch valuation date; used together with
+     *                         {@code dueFilterEnabled} for the optional maturity gate
+     * @param dueFilterEnabled when true (and the pocket allows set-off), claims whose
+     *                         due date is strictly after the valuation date are deferred
+     *                         to {@code batch_exclusion} with NOT_DUE_AT_VALUATION;
+     *                         claims with a null due date keep the existing rule.
+     *                         Pass-through (set-off forbidden) pockets ignore the gate:
+     *                         their original debts are always preserved 1:1.
+     */
+    public static PlannedGroup plan(AgreementSpec spec,
+                                    List<PlannerClaim> claims,
+                                    String groupCurrency,
+                                    GroupMode mode,
+                                    FxRateProvider fxProvider,
+                                    OffsetDateTime fxAsOf,
+                                    BigDecimal fxMargin,
+                                    LocalDate valuationDate,
+                                    boolean dueFilterEnabled) {
         boolean passThrough = mode == GroupMode.PASS_THROUGH;
 
         List<PlannedExclusion> exclusions = new ArrayList<>();
@@ -102,10 +129,11 @@ public final class NettingPlanner {
                 .toList();
 
         for (PlannerClaim c : ordered) {
-            String reason = exclusionReason(spec, c, groupCurrency, mode);
+            String reason = exclusionReason(spec, c, groupCurrency, mode,
+                    valuationDate, dueFilterEnabled);
             if (reason != null) {
                 exclusions.add(new PlannedExclusion(c.id(), c.invoiceNo(), reason,
-                        exclusionDetail(spec, c, groupCurrency, mode, reason)));
+                        exclusionDetail(spec, c, groupCurrency, mode, reason, valuationDate)));
                 continue;
             }
             if (passThrough) {
@@ -430,7 +458,8 @@ public final class NettingPlanner {
     }
 
     private static String exclusionReason(AgreementSpec spec, PlannerClaim c, String groupCurrency,
-                                          GroupMode mode) {
+                                          GroupMode mode, LocalDate valuationDate,
+                                          boolean dueFilterEnabled) {
         if (c.debtorCode().equals(c.creditorCode())) {
             return "SELF_DEBT";
         }
@@ -452,11 +481,21 @@ public final class NettingPlanner {
         if (mode == GroupMode.NET_SAME_CURRENCY && !c.currency().equals(groupCurrency)) {
             return "CROSS_CCY_NOT_ALLOWED";
         }
+        // Optional maturity gate, netting pockets only:
+        // a claim due strictly after the valuation date is deferred to a later
+        // batch so unmatured invoices cannot be set off early. A null due date
+        // keeps the existing rule (eligible), and set-off-forbidding agreements
+        // preserve every original debt regardless of maturity.
+        if (dueFilterEnabled && mode != GroupMode.PASS_THROUGH
+                && c.dueDate() != null && valuationDate != null
+                && c.dueDate().isAfter(valuationDate)) {
+            return "NOT_DUE_AT_VALUATION";
+        }
         return null;
     }
 
     private static String exclusionDetail(AgreementSpec spec, PlannerClaim c, String groupCurrency,
-                                          GroupMode mode, String reason) {
+                                          GroupMode mode, String reason, LocalDate valuationDate) {
         return switch (reason) {
             case "PLEDGED" -> "claim is pledged as collateral; set-off prohibited";
             case "DISPUTED" -> "claim is under dispute; excluded from netting";
@@ -466,6 +505,9 @@ public final class NettingPlanner {
                     "agreement forbids cross-currency set-off (" + c.currency() + " vs " + groupCurrency + ")";
             case "NOT_OPEN" -> "claim status is " + c.status();
             case "SELF_DEBT" -> "debtor and creditor are the same entity";
+            case "NOT_DUE_AT_VALUATION" -> "due date " + c.dueDate()
+                    + " is after valuation date " + valuationDate
+                    + "; deferred: claim is not mature yet, set-off postponed to a later batch";
             default -> null;
         };
     }

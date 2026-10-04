@@ -16,6 +16,7 @@ import { Batch } from '../models';
       <div class="card">
         <div class="muted">状态</div>
         <div><span class="tag" [class]="batch.status">{{ statusText }}</span></div>
+        <div class="muted" *ngIf="batch.dueFilterEnabled">⏳ 到期筛选：仅纳入估值日已到期</div>
         <div class="muted" *ngIf="batch.paidSimulatedAt">
           模拟付款 {{ batch.paidSimulatedAt | date: 'MM-dd HH:mm' }}
         </div>

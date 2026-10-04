@@ -106,6 +106,8 @@ export interface Batch {
   id: string;
   valuationDate: string;
   status: 'SIMULATED' | 'CONFIRMED' | 'PAID_SIMULATED';
+  /** Saved per-batch choice: only claims due at the valuation date entered set-off. */
+  dueFilterEnabled: boolean;
   incomingClaimCount: number;
   includedClaimCount: number;
   excludedClaimCount: number;

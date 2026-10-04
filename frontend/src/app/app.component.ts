@@ -40,10 +40,23 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               </option>
             </select>
           </label>
+          <label class="due-toggle" title="勾选后，到期日晚于估值日的债权不参与互抵，进入排除清单（到期日为空的债权不受影响）；禁止互抵协议仍按原债保留。">
+            <input type="checkbox" [(ngModel)]="dueFilterEnabled">
+            <span>只纳入估值日已到期债权</span>
+          </label>
           <input class="note" placeholder="备注（可选）" [(ngModel)]="note">
           <button class="primary" (click)="runSimulation()" [disabled]="loading">
             {{ loading ? '试算中…' : '生成试算方案（不改动债权）' }}
           </button>
+        </div>
+        <div class="muted hint">
+          <ng-container *ngIf="dueFilterEnabled">
+            本批次将启用到期筛选：到期日 <strong>晚于估值日</strong> 的允许互抵债权进入排除清单，
+            避免未到期发票被提前抵销；到期日为空的债权维持现有规则；禁止互抵协议仍按原债 1:1 保留。
+          </ng-container>
+          <ng-container *ngIf="!dueFilterEnabled">
+            默认不启用到期筛选，试算行为与原口径一致（含未到期债权）。
+          </ng-container>
         </div>
         <div class="muted hint" *ngIf="selectedAgreementObj() as a">
           当前协议：成员 {{ a.members.join('、') || '—' }}；
@@ -68,7 +81,11 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
           <tr *ngFor="let b of batches" [class.active]="current?.id === b.id">
             <td>{{ b.id }}</td>
             <td>{{ b.valuationDate }}</td>
-            <td><span class="tag" [class]="b.status">{{ statusText(b.status) }}</span></td>
+            <td>
+              <span class="tag" [class]="b.status">{{ statusText(b.status) }}</span>
+              <span class="tag DUE" title="本批次只纳入估值日已到期的允许互抵债权"
+                    *ngIf="b.dueFilterEnabled">仅已到期</span>
+            </td>
             <td class="num">{{ b.includedClaimCount }} / {{ b.excludedClaimCount }}</td>
             <td class="num">{{ b.originalLegCount }} → {{ b.nettedLegCount }}</td>
             <td class="num">{{ money(b.netAmount) }}</td>
@@ -118,6 +135,9 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               原始 {{ g.originalLegCount }} 笔 → 现金腿 {{ g.nettedLegCount }} 笔；
               逐笔尾差合计 {{ g.roundingDiffTotal }}（承担人 {{ g.roundingBearerCode || '—' }}）。
             </div>
+            <div class="muted group-meta" *ngIf="current.dueFilterEnabled && !g.passThrough">
+              ⏳ 本批次启用到期筛选（估值日 {{ current.valuationDate }}）：到期日晚于估值日的债权已推迟至后续批次，见下方排除清单。
+            </div>
 
             <app-debt-graph [group]="g" [claims]="claimsForGroup(g)"
                             (edgeSelected)="onEdge($event)"></app-debt-graph>
@@ -163,7 +183,9 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
               <tr *ngFor="let ex of g.exclusions">
                 <td>{{ ex.invoiceNo }}</td>
                 <td>{{ ex.claimId }}</td>
-                <td><span class="tag DISPUTED">{{ ex.reasonCode }}</span></td>
+                <td><span class="tag" [class]="exclusionClass(ex.reasonCode)">
+                  {{ exclusionLabel(ex.reasonCode) }}
+                </span></td>
                 <td class="muted">{{ ex.reasonDetail }}</td>
               </tr>
               </tbody>
@@ -187,6 +209,9 @@ import { BatchSummaryComponent } from './components/batch-summary.component';
     .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
     .controls .note { width: 240px; }
+    .controls .due-toggle { flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+    .controls .due-toggle input { margin: 0; }
+    .tag.DUE { color: #fcd34d; border-color: #fbbf24; margin-left: 4px; }
     .hint { margin-top: 8px; font-size: 12px; }
     table tr.active { background: rgba(56,189,248,.08); }
     .lifecycle { display: flex; gap: 10px; align-items: center; margin: 6px 0 12px; }
@@ -215,6 +240,8 @@ export class AppComponent implements OnInit {
   valuationDate = '2026-09-30';
   selectedAgreement = '';
   note = '';
+  // Optional per-batch maturity gate; default off keeps the original trial.
+  dueFilterEnabled = false;
   loading = false;
   busy = false;
 
@@ -253,7 +280,8 @@ export class AppComponent implements OnInit {
   runSimulation(): void {
     this.loading = true;
     const codes = this.selectedAgreement ? [this.selectedAgreement] : [];
-    this.api.simulate(this.valuationDate, codes, this.note).subscribe({
+    this.api.simulate(this.valuationDate, codes, this.note, this.dueFilterEnabled)
+      .subscribe({
       next: (b) => {
         this.loading = false;
         this.batches = [b, ...this.batches];
@@ -327,6 +355,26 @@ export class AppComponent implements OnInit {
 
   legText(l: { isOriginal: boolean; amount: number }): string {
     return l.isOriginal ? '原债保留' : l.amount === 0 ? '抵销' : '实付';
+  }
+
+  private static readonly REASON_LABELS: Record<string, string> = {
+    NOT_DUE_AT_VALUATION: '未到期·已推迟',
+    PLEDGED: '已质押',
+    DISPUTED: '存在争议',
+    NOT_OPEN: '状态非开放',
+    NOT_MEMBER_PAIR: '非协议成员对',
+    CCY_NOT_ALLOWED: '币种超范围',
+    CROSS_CCY_NOT_ALLOWED: '禁止跨币种',
+    FX_RATE_MISSING: '缺少汇率',
+    SELF_DEBT: '自我债务',
+  };
+
+  exclusionLabel(code: string): string {
+    return AppComponent.REASON_LABELS[code] ?? code;
+  }
+
+  exclusionClass(code: string): string {
+    return code === 'NOT_DUE_AT_VALUATION' ? 'DUE' : 'DISPUTED';
   }
 
   money(v: number): string {

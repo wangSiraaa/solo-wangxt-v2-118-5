@@ -128,13 +128,100 @@ class ClearingApplicationTests {
                 .andExpect(status().isConflict());
     }
 
+    @Test
+    void maturityFilterDefersUnmaturedInvoicesAndKeepsOldBatchesStable() throws Exception {
+        // ---- Trial at the demo valuation date with the maturity gate on ----
+        JsonNode sim = simulate(LocalDate.of(2026, 9, 30), true);
+        assertThat(sim.get("dueFilterEnabled").asBoolean()).isTrue();
+
+        // NA-CNY: ring 1 (all due) + one matured ring-2 invoice + one no-due-date
+        // invoice are included; the not-yet-due ring-2 invoice is deferred.
+        JsonNode cny = group(sim, "NA-CNY");
+        assertThat(cny.get("originalLegCount").asInt()).isEqualTo(5);
+        assertThat(reasons(cny)).containsExactlyInAnyOrder(
+                "PLEDGED", "DISPUTED", "NOT_DUE_AT_VALUATION");
+        JsonNode deferred = exclusionByReason(cny, "NOT_DUE_AT_VALUATION");
+        assertThat(deferred.get("claimId").asText()).isEqualTo("CLM-R2-002");
+        assertThat(deferred.get("reasonDetail").asText())
+                .contains("2026-10-18").contains("2026-09-30")
+                .containsIgnoringCase("deferred");
+        // Positions: A +600, B -600, C 0 -> a single real payment leg.
+        assertThat(cashLegs(cny)).isEqualTo(1);
+
+        // NA-NOFF forbids set-off: original debts are preserved regardless of the gate.
+        JsonNode noff = group(sim, "NA-NOFF");
+        assertThat(noff.get("passThrough").asBoolean()).isTrue();
+        assertThat(noff.get("legs").size()).isEqualTo(3);
+        assertThat(reasons(noff)).doesNotContain("NOT_DUE_AT_VALUATION");
+
+        // NA-XCCY: only the matured CNY claim enters; the two October claims are
+        // deferred, while the EUR claim keeps its currency-scope exclusion.
+        JsonNode xccy = group(sim, "NA-XCCY");
+        assertThat(xccy.get("originalLegCount").asInt()).isEqualTo(1);
+        assertThat(reasons(xccy)).containsExactlyInAnyOrder(
+                "NOT_DUE_AT_VALUATION", "NOT_DUE_AT_VALUATION", "CCY_NOT_ALLOWED");
+
+        String oldBatchId = sim.get("id").asText();
+
+        // ---- Valuation date advances past every due date: re-trial includes them ----
+        JsonNode later = simulate(LocalDate.of(2026, 10, 31), true);
+        assertThat(later.get("dueFilterEnabled").asBoolean()).isTrue();
+        JsonNode cnyLater = group(later, "NA-CNY");
+        assertThat(cnyLater.get("originalLegCount").asInt()).isEqualTo(6);
+        assertThat(reasons(cnyLater)).containsExactlyInAnyOrder("PLEDGED", "DISPUTED");
+        JsonNode xccyLater = group(later, "NA-XCCY");
+        assertThat(xccyLater.get("originalLegCount").asInt()).isEqualTo(3);
+        assertThat(reasons(xccyLater)).containsExactly("CCY_NOT_ALLOWED");
+
+        // ---- The stored old batch is unchanged by the later trial ----
+        JsonNode oldReloaded = getBatch(oldBatchId);
+        assertThat(oldReloaded.get("valuationDate").asText()).isEqualTo("2026-09-30");
+        assertThat(oldReloaded.get("dueFilterEnabled").asBoolean()).isTrue();
+        JsonNode oldCny = group(oldReloaded, "NA-CNY");
+        assertThat(oldCny.get("originalLegCount").asInt()).isEqualTo(5);
+        assertThat(reasons(oldCny)).contains("NOT_DUE_AT_VALUATION");
+    }
+
+    @Test
+    void defaultSimulationLeavesMaturityGateOffAndBehaviourUnchanged() throws Exception {
+        // No dueFilterEnabled field in the request -> behaves exactly as before:
+        // every open claim (including future-due ones) enters the netting.
+        JsonNode sim = simulate(LocalDate.of(2026, 9, 30), false);
+        assertThat(sim.get("dueFilterEnabled").asBoolean()).isFalse();
+        JsonNode cny = group(sim, "NA-CNY");
+        assertThat(cny.get("originalLegCount").asInt()).isEqualTo(6);
+        assertThat(reasons(cny)).containsExactlyInAnyOrder("PLEDGED", "DISPUTED");
+    }
+
     private JsonNode simulate(LocalDate date) throws Exception {
+        return simulate(date, null);
+    }
+
+    private JsonNode simulate(LocalDate date, Boolean dueFilterEnabled) throws Exception {
         var req = json.createObjectNode().put("valuationDate", date.toString());
+        if (dueFilterEnabled != null) {
+            req.put("dueFilterEnabled", dueFilterEnabled);
+        }
         return json.readTree(mockMvc.perform(post("/api/batches/simulate")
                         .contentType("application/json")
                         .content(json.writeValueAsString(req)))
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString());
+    }
+
+    private JsonNode getBatch(String id) throws Exception {
+        return json.readTree(mockMvc.perform(get("/api/batches/" + id))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+    }
+
+    private JsonNode exclusionByReason(JsonNode g, String reasonCode) {
+        for (JsonNode e : g.get("exclusions")) {
+            if (e.get("reasonCode").asText().equals(reasonCode)) {
+                return e;
+            }
+        }
+        throw new AssertionError("exclusion missing: " + reasonCode);
     }
 
     private JsonNode postJson(String path) throws Exception {

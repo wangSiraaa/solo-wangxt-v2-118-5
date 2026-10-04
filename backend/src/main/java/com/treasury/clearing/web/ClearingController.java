@@ -124,14 +124,16 @@ public class ClearingController {
 
     public record SimulateRequest(LocalDate valuationDate,
                                   List<String> agreementCodes,
-                                  String note) {
+                                  String note,
+                                  Boolean dueFilterEnabled) {
     }
 
     @PostMapping("/batches/simulate")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> simulate(@Valid @RequestBody SimulateRequest request) {
         NettingBatch batch = batchService.simulate(new SimulationRequest(
-                request.valuationDate(), request.agreementCodes(), request.note()));
+                request.valuationDate(), request.agreementCodes(), request.note(),
+                Boolean.TRUE.equals(request.dueFilterEnabled())));
         return toBatchJson(batchService.getBatch(batch.getId()));
     }
 
@@ -150,6 +152,7 @@ public class ClearingController {
             m.put("grossAmount", b.getGrossAmount());
             m.put("netAmount", b.getNetAmount());
             m.put("createdAt", b.getCreatedAt());
+            m.put("dueFilterEnabled", b.isDueFilterEnabled());
             return m;
         }).toList();
     }
@@ -188,6 +191,7 @@ public class ClearingController {
         m.put("createdAt", b.getCreatedAt());
         m.put("confirmedAt", nv(b.getConfirmedAt()));
         m.put("paidSimulatedAt", nv(b.getPaidSimulatedAt()));
+        m.put("dueFilterEnabled", b.isDueFilterEnabled());
         m.put("note", nv(b.getNote()));
 
         List<Map<String, Object>> groups = new ArrayList<>();

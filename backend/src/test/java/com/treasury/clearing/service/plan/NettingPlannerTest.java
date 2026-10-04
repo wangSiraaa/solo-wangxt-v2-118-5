@@ -5,6 +5,7 @@ import com.treasury.clearing.domain.LedgerSide;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.*;
 
@@ -12,14 +13,24 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class NettingPlannerTest {
 
+    private static final LocalDate VAL = LocalDate.of(2026, 9, 30);
+    private static final OffsetDateTime FX_AT = OffsetDateTime.parse("2026-09-30T09:00:00Z");
+
     private static PlannerClaim claim(String id, String debtor, String creditor,
                                       String amount, String ccy, ClaimStatus status) {
+        // No due date by default: keeps the historical eligibility rule.
         return new PlannerClaim(id, "INV-" + id, "AGR", debtor, creditor,
-                new BigDecimal(amount), ccy, status, "test");
+                new BigDecimal(amount), ccy, status, null, "test");
     }
 
     private static PlannerClaim claim(String id, String debtor, String creditor, String amount) {
         return claim(id, debtor, creditor, amount, "CNY", ClaimStatus.OPEN);
+    }
+
+    private static PlannerClaim dueClaim(String id, String debtor, String creditor, String amount,
+                                         LocalDate dueDate) {
+        return new PlannerClaim(id, "INV-" + id, "AGR", debtor, creditor,
+                new BigDecimal(amount), "CNY", ClaimStatus.OPEN, dueDate, "test");
     }
 
     private static AgreementSpec spec(boolean allowsNetting, boolean crossCcy, String... members) {
@@ -165,8 +176,7 @@ class NettingPlannerTest {
     }
 
     @Test
-    void nonMembersAndForeignCurrencyAreExcluded() {
-        PlannedGroup g = NettingPlanner.plan(
+    void nonMembersAndForeignCurrencyAreExcluded() {        PlannedGroup g = NettingPlanner.plan(
                 spec(true, false, "A", "B"),
                 List.of(
                         claim("c1", "A", "B", "100.00"),
@@ -177,6 +187,138 @@ class NettingPlannerTest {
 
         assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
                 .containsExactlyInAnyOrder("NOT_MEMBER_PAIR", "CROSS_CCY_NOT_ALLOWED");
+    }
+
+    // ------------------------------------------------------------------
+    // Optional maturity gate ("only claims due at valuation date")
+    // ------------------------------------------------------------------
+    @Test
+    void dueFilterOnIncludesOnlyTheMaturedInvoice() {
+        // One matured and one not-yet-due invoice in the same netting pocket.
+        PlannedGroup g = NettingPlanner.plan(
+                spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("due", "A", "B", "100.00", VAL),
+                        dueClaim("future", "B", "A", "100.00", VAL.plusDays(10))),
+                "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL, true);
+
+        assertThat(g.originalLegCount()).isEqualTo(1);
+        assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
+                .containsExactly("NOT_DUE_AT_VALUATION");
+        PlannedExclusion ex = g.exclusions().get(0);
+        assertThat(ex.claimId()).isEqualTo("future");
+        assertThat(ex.reasonDetail()).contains(VAL.plusDays(10).toString()).contains(VAL.toString());
+        // The matured invoice cannot be offset against anything and survives as a real leg.
+        assertThat(cashLegCount(g)).isEqualTo(1);
+        assertThat(cashAmount(g, "A", "B")).isEqualByComparingTo("100.00");
+    }
+
+    @Test
+    void dueFilterOffKeepsTheHistoricalBehaviour() {
+        PlannedGroup g = NettingPlanner.plan(
+                spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("due", "A", "B", "100.00", VAL),
+                        dueClaim("future", "B", "A", "100.00", VAL.plusDays(10))),
+                "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL, false);
+
+        // Without the gate the two opposite claims net to zero: 2 included, 0 excluded.
+        assertThat(g.originalLegCount()).isEqualTo(2);
+        assertThat(g.exclusions()).isEmpty();
+        assertThat(cashLegCount(g)).isZero();
+    }
+
+    @Test
+    void dueFilterOnTreatsDueOnValuationDateAsMatured() {
+        PlannedGroup g = NettingPlanner.plan(
+                spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("on", "A", "B", "100.00", VAL),
+                        dueClaim("before", "B", "A", "100.00", VAL.minusDays(1))),
+                "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL, true);
+
+        assertThat(g.exclusions()).isEmpty();
+        assertThat(g.originalLegCount()).isEqualTo(2);
+        assertThat(cashLegCount(g)).isZero();
+    }
+
+    @Test
+    void dueFilterOnLeavesNullDueDateClaimsOnTheExistingRule() {
+        // A claim without a due date stays eligible even with the gate enabled.
+        PlannedGroup g = NettingPlanner.plan(
+                spec(true, false, "A", "B"),
+                List.of(
+                        claim("nodue", "A", "B", "100.00"),
+                        dueClaim("future", "B", "A", "100.00", VAL.plusDays(10))),
+                "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL, true);
+
+        assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
+                .containsExactly("NOT_DUE_AT_VALUATION");
+        assertThat(g.originalLegCount()).isEqualTo(1);
+        assertThat(g.legs().stream().flatMap(l -> l.items().stream())
+                .map(PlannedItem::claimId).findFirst().orElseThrow()).isEqualTo("nodue");
+    }
+
+    @Test
+    void dueFilterOnStillExcludesPledgedAndDisputedFirst() {
+        PlannedGroup g = NettingPlanner.plan(
+                spec(true, false, "A", "B"),
+                List.of(
+                        dueClaim("future-pledge", "A", "B", "100.00", VAL.plusDays(10)),
+                        new PlannerClaim("pledge", "INV-pledge", "AGR", "A", "B",
+                                new BigDecimal("100.00"), "CNY", ClaimStatus.PLEDGED,
+                                VAL, "test"),
+                        new PlannerClaim("dispute", "INV-dispute", "AGR", "A", "B",
+                                new BigDecimal("100.00"), "CNY", ClaimStatus.DISPUTED,
+                                VAL, "test")),
+                "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL, true);
+
+        assertThat(g.exclusions()).extracting(PlannedExclusion::reasonCode)
+                .containsExactlyInAnyOrder("NOT_DUE_AT_VALUATION", "PLEDGED", "DISPUTED");
+    }
+
+    @Test
+    void dueFilterIsIgnoredByPassThroughAgreements() {
+        // Set-off forbidden -> every original debt survives 1:1, even if not due yet.
+        PlannedGroup g = NettingPlanner.plan(
+                spec(false, false, "A", "B"),
+                List.of(dueClaim("future", "A", "B", "500.00", VAL.plusDays(10))),
+                "CNY", GroupMode.PASS_THROUGH,
+                fixedFx(Map.of()), FX_AT, null, VAL, true);
+
+        assertThat(g.passThrough()).isTrue();
+        assertThat(g.legs()).hasSize(1);
+        assertThat(g.legs().get(0).original()).isTrue();
+        assertThat(g.legs().get(0).amount()).isEqualByComparingTo("500.00");
+        assertThat(g.exclusions()).isEmpty();
+    }
+
+    @Test
+    void advancingValuationDateAdmitsThePreviouslyDeferredClaim() {
+        List<PlannerClaim> claims = List.of(
+                dueClaim("due", "A", "B", "100.00", VAL),
+                dueClaim("future", "B", "A", "100.00", VAL.plusDays(10)));
+
+        PlannedGroup atValuation = NettingPlanner.plan(
+                spec(true, false, "A", "B"), claims, "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL, true);
+        assertThat(atValuation.originalLegCount()).isEqualTo(1);
+        assertThat(atValuation.exclusions()).extracting(PlannedExclusion::reasonCode)
+                .containsExactly("NOT_DUE_AT_VALUATION");
+
+        // Re-trial after the valuation date passes the due date -> both claims enter,
+        // they offset to zero cash. (The old batch is stored and is not recomputed.)
+        PlannedGroup later = NettingPlanner.plan(
+                spec(true, false, "A", "B"), claims, "CNY", GroupMode.NET_SAME_CURRENCY,
+                fixedFx(Map.of()), FX_AT, null, VAL.plusDays(20), true);
+        assertThat(later.originalLegCount()).isEqualTo(2);
+        assertThat(later.exclusions()).isEmpty();
+        assertThat(cashLegCount(later)).isZero();
     }
 
     // ------------------------------------------------------------------
